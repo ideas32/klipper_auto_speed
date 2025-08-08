@@ -9,8 +9,9 @@
 import os
 from time import perf_counter
 import datetime as dt
+import math
 
-from .funcs import calculate_graph, calculate_accel_focused_dist, calculate_velo_plateau_dist
+from .funcs import calculate_graph, calculate_accel_focused_dist
 from .move import Move, MoveX, MoveY, MoveZ, MoveDiagX, MoveDiagY
 from .wrappers import ResultsWrapper, AttemptWrapper
 
@@ -50,7 +51,8 @@ class AutoSpeed:
         
         self.accel_test_velocity = config.getfloat('accel_test_velocity', 200.0, above=1.0)
         self.samples_per_test_type = config.getint('samples_per_test_type', 3, minval=1)
-        self.final_validation_iterations = config.getint('final_validation_iterations', 30, minval=1)
+        self.final_validation_iterations = config.getint('final_validation_iterations', 5, minval=1)
+        self.validation_pattern_size = config.getfloat('validation_pattern_size', None, above=0.0)
 
         self.MAX_MISSED_THRESHOLD = 3.0
         self.MIN_SHORT_MOVE_DISTANCE = 5.0
@@ -133,9 +135,9 @@ class AutoSpeed:
         self.cmd_AUTO_SPEED_GRAPH(gcmd)
 
         self.gcode.respond_info("\n" + "="*40)
-        self.gcode.respond_info(f"STAGE 4: Performing final safe validation of recommended accel ({rec_accel:.0f}mm/s^2).")
+        self.gcode.respond_info(f"STAGE 4: Performing final 'Chaos Star' validation of recommended accel ({rec_accel:.0f}mm/s^2).")
         self.gcode.respond_info("="*40 + "\n")
-        self.run_safe_validation(rec_accel, axes[0], validation_iters)
+        self.run_safe_validation(rec_accel, validation_iters)
 
         self.gcode.respond_info("\n" + "="*40)
         self.gcode.respond_info("AUTO_SPEED Routine Complete.")
@@ -185,8 +187,7 @@ class AutoSpeed:
         respond += f"Recommended safe acceleration: {rw.vals['rec']:.0f}\n"
         self.gcode.respond_info(respond)
         
-        validation_axis = axes[0] if axes else self.default_axes.split(',')[0]
-        self.run_safe_validation(rw.vals['rec'], validation_axis, validation_iters)
+        self.run_safe_validation(rw.vals['rec'], validation_iters)
         return rw
 
     def accel_binary_search(self, aw: AttemptWrapper, samples_per_type: int) -> float:
@@ -211,56 +212,106 @@ class AutoSpeed:
     def _run_gauntlet_for_accel(self, test_accel: float, aw: AttemptWrapper, samples_per_type: int) -> bool:
         last_known_steps, _ = self._prehome(aw.move.home)
         
-        self.gcode.respond_info(f"--- Running {samples_per_type} Accel-Focused Tests (Short & Sharp) ---")
+        self.gcode.respond_info(f"--- Running {samples_per_type}x2 Accel-Focused Tests (Short & Sharp) ---")
         dist_a_theoretical = calculate_accel_focused_dist(self.accel_test_velocity, test_accel)
         dist_a = max(dist_a_theoretical, self.MIN_SHORT_MOVE_DISTANCE)
         aw.move.Calc(self.axis_limits, dist_a)
         for i in range(samples_per_type):
-            self.gcode.respond_info(f"Sample {i+1}/{samples_per_type}...")
-            valid, current_steps = self._run_single_test_cycle(last_known_steps, aw, test_accel)
+            self.gcode.respond_info(f"Sample {i*2+1}/{samples_per_type*2} (Forward)...")
+            valid, current_steps = self._run_single_test_cycle(last_known_steps, aw, test_accel, forward=True)
+            if not valid: return False
+            last_known_steps = current_steps
+            
+            self.gcode.respond_info(f"Sample {i*2+2}/{samples_per_type*2} (Reverse)...")
+            valid, current_steps = self._run_single_test_cycle(last_known_steps, aw, test_accel, forward=False)
             if not valid: return False
             last_known_steps = current_steps
 
-        self.gcode.respond_info(f"--- Running {samples_per_type} Velo-Plateau Tests (Long & Sustained) ---")
+        self.gcode.respond_info(f"--- Running {samples_per_type}x2 Velo-Plateau Tests (Long & Sustained) ---")
         dist_b = aw.move.max_safe_dist
         aw.move.Calc(self.axis_limits, dist_b)
         for i in range(samples_per_type):
-            self.gcode.respond_info(f"Sample {i+1}/{samples_per_type}...")
-            valid, current_steps = self._run_single_test_cycle(last_known_steps, aw, test_accel)
+            self.gcode.respond_info(f"Sample {i*2+1}/{samples_per_type*2} (Forward)...")
+            valid, current_steps = self._run_single_test_cycle(last_known_steps, aw, test_accel, forward=True)
+            if not valid: return False
+            last_known_steps = current_steps
+            
+            self.gcode.respond_info(f"Sample {i*2+2}/{samples_per_type*2} (Reverse)...")
+            valid, current_steps = self._run_single_test_cycle(last_known_steps, aw, test_accel, forward=False)
             if not valid: return False
             last_known_steps = current_steps
             
         return True
 
-    def _run_single_test_cycle(self, start_steps, aw: AttemptWrapper, current_accel: float):
-        # This is the core safe test sequence
+    def _run_single_test_cycle(self, start_steps, aw: AttemptWrapper, current_accel: float, forward: bool = True):
         self._set_velocity(self.default_velocity, self.default_accel, self.default_scv, self.default_accel_control_val)
         self._move(aw.move.center, self.default_velocity)
-        self.toolhead.wait_moves() # Dwell to settle
+        self.toolhead.wait_moves()
         
         self._set_velocity(self.accel_test_velocity, current_accel, aw.scv, 0.0)
-        self._move(aw.move.corner_a, self.accel_test_velocity)
-        self._move(aw.move.corner_b, self.accel_test_velocity)
-        self._move(aw.move.center, self.accel_test_velocity)
+        if forward:
+            self._move(aw.move.corner_a, self.accel_test_velocity)
+            self._move(aw.move.corner_b, self.accel_test_velocity)
+        else:
+            self._move(aw.move.corner_b, self.accel_test_velocity)
+            self._move(aw.move.corner_a, self.accel_test_velocity)
         self.toolhead.wait_moves()
         
         valid, current_steps, _, _ = self._posttest(start_steps, aw.max_missed, aw.move.home)
         return valid, current_steps
 
-    def run_safe_validation(self, recommended_accel: float, axis: str, iterations: int):
+    def run_safe_validation(self, recommended_accel: float, iterations: int):
         passes, failures = 0, 0
         aw = AttemptWrapper()
-        self.init_axis(aw, axis)
         aw.max_missed = self.MAX_MISSED_THRESHOLD
-        aw.home = aw.move.home
         aw.scv = self.scv
-        dist = aw.move.max_safe_dist
-        aw.move.Calc(self.axis_limits, dist)
+        aw.home = [True, True, False]
+
+        min_travel = min(self.axis_limits["x"]["dist"], self.axis_limits["y"]["dist"])
+        max_safe_size = (min_travel / 3.0) - (10.0 / 1.5)
+
+        if self.validation_pattern_size is None:
+            size = max_safe_size
+            self.gcode.respond_info(f"AUTO_SPEED: No validation pattern size configured. Automatically using max safe size: {size:.2f}mm")
+        else:
+            size = self.validation_pattern_size
+            if size > max_safe_size:
+                self.gcode.respond_info(f"ERROR: Configured validation_pattern_size ({size}mm) is unsafe for this printer.")
+                self.gcode.respond_info(f"The maximum safe size is {max_safe_size:.2f}mm. Skipping validation.")
+                return
+
+        self.gcode.respond_info(f"--- Automated 'Chaos Star' Validation ({size:.1f}mm pattern) ---")
+        self.gcode.respond_info(f"Performing {iterations} full iterations of the chaotic pattern.")
+
+        center_x, center_y = self.axis_limits["x"]["center"], self.axis_limits["y"]["center"]
+        half_size = size / 2.0
+        c1 = [center_x - half_size, center_y - half_size, None]
+        c2 = [center_x + half_size, center_y - half_size, None]
+        c3 = [center_x + half_size, center_y + half_size, None]
+        c4 = [center_x - half_size, center_y + half_size, None]
+        m1 = [center_x - half_size, center_y, None]
+        m2 = [center_x, center_y - half_size, None]
+        m3 = [center_x + half_size, center_y, None]
+        m4 = [center_x, center_y + half_size, None]
+        ctr = [center_x, center_y, None]
 
         for i in range(iterations):
-            self.gcode.respond_info(f"Validation run {i+1}/{iterations}...")
-            start_steps, _ = self._prehome(aw.move.home)
-            valid, _ = self._run_single_test_cycle(start_steps, aw, recommended_accel)
+            self.gcode.respond_info(f"Validation Iteration {i+1}/{iterations}...")
+            start_steps, _ = self._prehome(aw.home)
+            
+            self._set_velocity(self.default_velocity, self.default_accel, self.default_scv, self.default_accel_control_val)
+            self._move(ctr, self.default_velocity)
+            self.toolhead.wait_moves()
+            
+            self._set_velocity(self.accel_test_velocity, recommended_accel, aw.scv, 0.0)
+            
+            self._move(c1, self.accel_test_velocity); self._move(c2, self.accel_test_velocity); self._move(c3, self.accel_test_velocity); self._move(c4, self.accel_test_velocity); self._move(c1, self.accel_test_velocity)
+            self._move(c3, self.accel_test_velocity); self._move(c1, self.accel_test_velocity); self._move(c2, self.accel_test_velocity); self._move(c4, self.accel_test_velocity); self._move(c3, self.accel_test_velocity)
+            self._move(m1, self.accel_test_velocity); self._move(m3, self.accel_test_velocity); self._move(m2, self.accel_test_velocity); self._move(m4, self.accel_test_velocity); self._move(m1, self.accel_test_velocity)
+            self._move(c2, self.accel_test_velocity)
+            self.toolhead.wait_moves()
+
+            valid, _, _, _ = self._posttest(start_steps, aw.max_missed, aw.home)
             if valid: passes += 1
             else: failures += 1
         
@@ -592,8 +643,6 @@ class AutoSpeed:
         self.toolhead.manual_move(coord, speed)
 
     def _home(self, x=True, y=True, z=True):
-        # This function now exclusively uses the stored safe defaults for the homing move.
-        # It no longer saves/restores state, making it safer and more predictable.
         self._set_velocity(self.default_velocity, self.default_accel, self.default_scv, self.default_accel_control_val)
         command = ["G28"]
         if x: command[-1] += " X0"
@@ -696,4 +745,4 @@ class AutoSpeed:
         max_v, min_v, avg_v = max(positions), min(positions), sum(positions) / len(positions)
         range_v = max_v - min_v
         sigma = (sum([(z - avg_v) ** 2 for z in positions]) / len(positions)) ** 0.5
-        gcmd.respond_info(f"Z endstop accuracy results: maximum {max_v:.6f}, minimum {min_v:.6f}, range {range_v:.6f}, average {avg_v:.6f}, standard deviation {sigma:.6f}")
+        gcmd.respond_info(f"Z endstop accuracy results: maximum {max_v:.6f}, minimum {min_v:.6f}, range {range_v:.6f}, average {avg_v:.6f}, standard deviation {sigma:.6f}")```
