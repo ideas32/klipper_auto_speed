@@ -260,6 +260,8 @@ class AutoSpeed:
         else: self.gcode.respond_info("CONFIRMATION WARNING: Failures detected. Consider a lower value or increasing 'derate'.")
         self.gcode.respond_info("="*40)
 
+    # --- ALL ORIGINAL AND HELPER METHODS BELOW THIS LINE ---
+
     def handle_connect(self):
         self.toolhead = self.printer.lookup_object('toolhead')
         self.th_accel = self.toolhead.max_accel / 2
@@ -563,6 +565,9 @@ class AutoSpeed:
             if x: variance["steps"]["x"] = steps["x"]
             if y: variance["steps"]["y"] = steps["y"]
         return variance
+
+    def _move(self, coord, speed):
+        self.toolhead.manual_move(coord, speed)
 
     def _home(self, x=True, y=True, z=True):
         prev_accel, prev_veloc, prev_scv = self.toolhead.max_accel, self.toolhead.max_velocity, self.toolhead.square_corner_velocity
