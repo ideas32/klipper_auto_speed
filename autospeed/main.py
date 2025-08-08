@@ -745,4 +745,4 @@ class AutoSpeed:
         max_v, min_v, avg_v = max(positions), min(positions), sum(positions) / len(positions)
         range_v = max_v - min_v
         sigma = (sum([(z - avg_v) ** 2 for z in positions]) / len(positions)) ** 0.5
-        gcmd.respond_info(f"Z endstop accuracy results: maximum {max_v:.6f}, minimum {min_v:.6f}, range {range_v:.6f}, average {avg_v:.6f}, standard deviation {sigma:.6f}")```
+        gcmd.respond_info(f"Z endstop accuracy results: maximum {max_v:.6f}, minimum {min_v:.6f}, range {range_v:.6f}, average {avg_v:.6f}, standard deviation {sigma:.6f}")
