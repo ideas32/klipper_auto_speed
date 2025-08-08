@@ -169,7 +169,6 @@ class AutoSpeed:
             if rw.vals.get(axis): respond += f"| {axis.replace('_', ' ').upper()} max: {rw.vals[axis]:.0f}\n"
         self.gcode.respond_info(respond)
 
-        # Correctly handle derating and display
         original_vals = dict(rw.vals)
         rw.derate(derate)
         
@@ -261,7 +260,32 @@ class AutoSpeed:
         else: self.gcode.respond_info("CONFIRMATION WARNING: Failures detected. Consider a lower value or increasing 'derate'.")
         self.gcode.respond_info("="*40)
 
-    # --- LEGACY/ORIGINAL METHODS BELOW ---
+    def handle_connect(self):
+        self.toolhead = self.printer.lookup_object('toolhead')
+        self.th_accel = self.toolhead.max_accel / 2
+        self.th_veloc = self.toolhead.max_velocity / 2
+        self.th_scv = self.toolhead.square_corner_velocity
+        if self.printer.lookup_object("screw_tilt_adjust", None) is not None: self.level = "STA"
+        elif self.printer.lookup_object("z_tilt", None) is not None: self.level = "ZT"
+        elif self.printer.lookup_object("quad_gantry_level", None) is not None: self.level = "QGL"
+        else: self.level = None
+
+    def handle_home_rails_end(self, homing_state, rails):
+        if not len(self.steppers.keys()) == 3:
+            for rail in rails:
+                pos_min, pos_max = rail.get_range()
+                for stepper in rail.get_steppers():
+                    name = stepper._name
+                    if name in ["stepper_x", "stepper_y", "stepper_z"]:
+                        config = self.printer.lookup_object('configfile').status_raw_config[name]
+                        microsteps = int(config["microsteps"])
+                        homing_retract_dist = float(config.get("homing_retract_dist", 5))
+                        second_homing_speed = float(config.get("second_homing_speed", 5))
+                        self.steppers[name[-1]] = [pos_min, pos_max, microsteps, homing_retract_dist, second_homing_speed]
+            if self.steppers.get("x"): self.axis_limits["x"] = {"min": self.steppers["x"][0], "max": self.steppers["x"][1], "center": (self.steppers["x"][0] + self.steppers["x"][1]) / 2, "dist": self.steppers["x"][1] - self.steppers["x"][0], "home": self.gcode_move.homing_position[0]}
+            if self.steppers.get("y"): self.axis_limits["y"] = {"min": self.steppers["y"][0], "max": self.steppers["y"][1], "center": (self.steppers["y"][0] + self.steppers["y"][1]) / 2, "dist": self.steppers["y"][1] - self.steppers["y"][0], "home": self.gcode_move.homing_position[1]}
+            if self.steppers.get("z"): self.axis_limits["z"] = {"min": self.steppers["z"][0], "max": self.steppers["z"][1], "center": (self.steppers["z"][0] + self.steppers["z"][1]) / 2, "dist": self.steppers["z"][1] - self.steppers["z"][0], "home": self.gcode_move.homing_position[2]}
+
     cmd_AUTO_SPEED_VELOCITY_help = ("(Legacy) Finds max velocity using the original method.")
     def cmd_AUTO_SPEED_VELOCITY(self, gcmd):
         if not len(self.steppers.keys()) == 3: raise gcmd.error(f"Printer must be homed first!")
@@ -425,14 +449,12 @@ class AutoSpeed:
         aw.move.Init(self.axis_limits, aw.margin, self.isolate_xy)
 
     def binary_search(self, aw: AttemptWrapper):
-        # This is the original, flawed binary search method.
-        # It is DEPRECATED and kept only for compatibility with legacy commands.
         aw.time_start = perf_counter()
         m_min, m_max = aw.min, aw.max
         m_var = m_min + (m_max - m_min) // 3
         if aw.veloc == 0.0: aw.veloc = 1.0
         if aw.accel == 0.0: aw.accel = 1.0
-        from .funcs import calculate_accel, calculate_velocity # Local import to avoid namespace conflicts
+        from .funcs import calculate_accel, calculate_velocity
         if aw.type in ("accel", "graph"):
             m_stat, o_veloc = aw.veloc, aw.veloc
             if o_veloc == 1.0: aw.accel = calculate_accel(aw.veloc, aw.move.max_dist)

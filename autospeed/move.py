@@ -17,24 +17,19 @@ class Move:
         self.corner_b = [None, None, None]
 
     def __str__(self):
-        # A simple string representation for debugging if needed
         return (f"Move pattern: Center={self.center}, "
                 f"CornerA={self.corner_a}, CornerB={self.corner_b}")
 
     def Init(self, axis_limits, margin, isolate_xy):
-        # This method is now responsible for calculating the absolute safety limit for a move.
         pass
 
     def Calc(self, axis_limits, distance: float):
-        # This method now takes a pre-calculated distance and determines the
-        # coordinates for the safe, centered, reversing move pattern.
         pass
 
 class MoveX(Move):
     def Init(self, axis_limits, margin, isolate_xy):
         home_y = not isolate_xy 
         self.home = [True, home_y, False]
-        # Max safe distance is 75% of half the axis travel
         self.max_safe_dist = (axis_limits["x"]["dist"] / 2.0) * 0.75
 
     def Calc(self, axis_limits, distance: float):
@@ -73,7 +68,6 @@ class MoveDiagX(Move):
         self.dist = min(distance, self.max_safe_dist)
         center_x = axis_limits["x"]["center"]
         center_y = axis_limits["y"]["center"]
-        # The distance to move from the center along one axis of the diagonal
         move_offset = (self.dist / 2.0) * math.sin(math.radians(45))
 
         self.center = [center_x, center_y, None]
