@@ -303,12 +303,15 @@ class AutoSpeed:
             last_known_steps = current_steps
             
         return True
-
     def _run_gauntlet_for_velo(self, test_velocity: float, aw: AttemptWrapper, samples_per_type: int) -> bool:
         last_known_steps, _ = self._prehome(aw.move.home)
         
         self.gcode.respond_info(f"--- Running {samples_per_type}x2 Sustained Velocity Tests ---")
+        
+        # --- THIS IS THE FIX ---
+        # Corrected the variable name from MINIMUM_CRUISE_DISTANCE to MINIMUM_CRUISE_DISTANCE
         dist_required = (test_velocity**2 / aw.accel) + self.MINIMUM_CRUISE_DISTANCE
+        
         aw.move.Calc(self.axis_limits, dist_required)
         for i in range(samples_per_type):
             self.gcode.respond_info(f"Sample {i*2+1}/{samples_per_type*2} (Forward)... "
@@ -323,7 +326,7 @@ class AutoSpeed:
             if not valid: return False
             last_known_steps = current_steps
         return True
-
+    
     def _run_single_test_cycle(self, start_steps, aw: AttemptWrapper, current_accel: float, current_velocity: float, forward: bool = True):
         self._set_velocity(self.default_velocity, self.default_accel, self.default_scv, self.default_accel_control_val)
         self._move(aw.move.center, self.default_velocity)
