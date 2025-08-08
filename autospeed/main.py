@@ -35,19 +35,17 @@ class AutoSpeed:
 
         self.margin = config.getfloat('margin', default=20.0, above=0.0)
         self.settling_home = config.getboolean('settling_home', default=True)
-        # --- THIS IS THE FIX ---
-        # Initialize max_missed_original from the config for legacy functions
         self.max_missed_original = config.getfloat('max_missed', default=1.0)
         self.endstop_samples = config.getint('endstop_samples', default=3, minval=2)
 
         self.accel_min = config.getfloat('accel_min', default=1000.0, above=1.0)
         self.accel_max = config.getfloat('accel_max', default=100000.0, above=self.accel_min)
-        self.accel_accu = config.getfloat('accel_accu', default=0.05, above=0.0, below=1.0)
+        self.accel_accu = config.getfloat('accel_accu', default=0.01, above=0.0, below=1.0)
         self.scv = config.getfloat('scv', default=5, above=1.0, below=50)
 
         self.veloc_min = config.getfloat('velocity_min', default=50.0, above=1.0)
         self.veloc_max = config.getfloat('velocity_max', default=5000.0, above=self.veloc_min)
-        self.veloc_accu = config.getfloat('velocity_accu', default=0.05, above=0.0, below=1.0)
+        self.velocity_precision = config.getfloat('velocity_precision', 50.0, above=0.0)
 
         self.derate = config.getfloat('derate', default=0.8, above=0.0, below=1.0)
         
@@ -59,7 +57,7 @@ class AutoSpeed:
         self.MAX_MISSED_THRESHOLD = 3.0
         self.MIN_SHORT_MOVE_DISTANCE = 5.0
         self.MINIMUM_CRUISE_DISTANCE = 20.0
-        
+
         results_default = os.path.expanduser('~')
         for path in (os.path.dirname(self.printer.start_args['log_file']), os.path.expanduser('~/printer_data/config')):
             if os.path.exists(path):
@@ -123,7 +121,7 @@ class AutoSpeed:
         self.gcode.respond_info("="*40 + "\n")
 
         aw_velo = AttemptWrapper()
-        aw_velo.type, aw_velo.accuracy, aw_velo.max_missed = "velocity", self.veloc_accu, self.MAX_MISSED_THRESHOLD
+        aw_velo.type, aw_velo.max_missed = "velocity", self.MAX_MISSED_THRESHOLD
         aw_velo.margin, aw_velo.min, aw_velo.max, aw_velo.scv = self.margin, self.veloc_min, veloc_max, self.scv
         aw_velo.accel = rec_accel
         self.init_axis(aw_velo, axes[0])
@@ -197,7 +195,6 @@ class AutoSpeed:
         derate = gcmd.get_float('DERATE', self.derate, above=0.0, below=1.0)
         veloc_min = gcmd.get_float('VELOCITY_MIN', self.veloc_min, above=1.0)
         veloc_max = gcmd.get_float('VELOCITY_MAX', self.veloc_max, above=veloc_min)
-        veloc_accu = gcmd.get_float('VELOCITY_ACCU', self.veloc_accu, above=0.0, below=1.0)
         accel = gcmd.get_float('ACCEL', self.default_accel, above=1.0)
         scv = gcmd.get_float('SCV', self.scv, above=1.0)
         samples = gcmd.get_int('SAMPLES', self.samples_per_test_type, minval=1)
@@ -207,7 +204,7 @@ class AutoSpeed:
         start = perf_counter()
         for axis in axes:
             aw = AttemptWrapper()
-            aw.type, aw.accuracy, aw.max_missed = "velocity", veloc_accu, self.MAX_MISSED_THRESHOLD
+            aw.type, aw.max_missed = "velocity", self.MAX_MISSED_THRESHOLD
             aw.margin, aw.min, aw.max, aw.accel, aw.scv = self.margin, veloc_min, veloc_max, accel, scv
             self.init_axis(aw, axis)
             rw.vals[aw.axis] = self.velo_binary_search(aw, samples)
@@ -251,7 +248,7 @@ class AutoSpeed:
     def velo_binary_search(self, aw: AttemptWrapper, samples_per_type: int) -> float:
         aw.time_start = perf_counter()
         m_min, m_max = aw.min, aw.max
-        while (m_max - m_min) > (m_min * aw.accuracy):
+        while (m_max - m_min) > self.velocity_precision:
             test_velocity = (m_min + m_max) / 2.0
             if test_velocity <= m_min or test_velocity >= m_max: break
             self.gcode.respond_info(f"\n--- Testing velocity value: {test_velocity:.0f} ---")
@@ -304,15 +301,12 @@ class AutoSpeed:
             last_known_steps = current_steps
             
         return True
+
     def _run_gauntlet_for_velo(self, test_velocity: float, aw: AttemptWrapper, samples_per_type: int) -> bool:
         last_known_steps, _ = self._prehome(aw.move.home)
         
         self.gcode.respond_info(f"--- Running {samples_per_type}x2 Sustained Velocity Tests ---")
-        
-        # --- THIS IS THE FIX ---
-        # Corrected the variable name from MINIMUM_CRUISE_DISTANCE to MINIMUM_CRUISE_DISTANCE
         dist_required = (test_velocity**2 / aw.accel) + self.MINIMUM_CRUISE_DISTANCE
-        
         aw.move.Calc(self.axis_limits, dist_required)
         for i in range(samples_per_type):
             self.gcode.respond_info(f"Sample {i*2+1}/{samples_per_type*2} (Forward)... "
@@ -327,7 +321,7 @@ class AutoSpeed:
             if not valid: return False
             last_known_steps = current_steps
         return True
-    
+
     def _run_single_test_cycle(self, start_steps, aw: AttemptWrapper, current_accel: float, current_velocity: float, forward: bool = True):
         self._set_velocity(self.default_velocity, self.default_accel, self.default_scv, self.default_accel_control_val)
         self._move(aw.move.center, self.default_velocity)
@@ -475,7 +469,7 @@ class AutoSpeed:
         veloc_min = gcmd.get_float('VELOCITY_MIN', 200.0, above=0.0)
         veloc_max = gcmd.get_float('VELOCITY_MAX', 700.0, above=veloc_min)
         veloc_div = gcmd.get_int('VELOCITY_DIV', 5, minval=0)
-        accel_accu = gcmd.get_float('ACCEL_ACCU', 0.05, above=0.0, below=1.0)
+        accel_accu = gcmd.get_float('ACCEL_ACCU', self.accel_accu, above=0.0, below=1.0)
         accel_min_slope = gcmd.get_int('ACCEL_MIN_SLOPE', 100, minval=0)
         accel_max_slope = gcmd.get_int('ACCEL_MAX_SLOPE', 1800, minval=accel_min_slope)
         veloc_step = (veloc_max - veloc_min) // (veloc_div - 1) if veloc_div > 1 else 0
@@ -493,7 +487,7 @@ class AutoSpeed:
                 self.gcode.respond_info(f"AUTO SPEED graph {aw.axis} - v{veloc}")
                 aw.min = round(calculate_graph(veloc, accel_min_slope))
                 aw.max = round(calculate_graph(veloc, accel_max_slope))
-                aw.veloc = veloc
+                self.accel_test_velocity = veloc # Use the graphing velocity for the test
                 accels.append(self.accel_binary_search(aw, self.samples_per_test_type))
             plt.plot(velocs, accels, 'go-', label='measured')
             plt.plot(velocs, [a * derate for a in accels], 'g-', label='derated')
