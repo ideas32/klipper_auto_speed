@@ -35,7 +35,6 @@ class AutoSpeed:
 
         self.margin = config.getfloat('margin', default=20.0, above=0.0)
         self.settling_home = config.getboolean('settling_home', default=True)
-        self.max_missed_original = config.getfloat('max_missed', default=1.0)
         self.endstop_samples = config.getint('endstop_samples', default=3, minval=2)
 
         self.accel_min = config.getfloat('accel_min', default=1000.0, above=1.0)
@@ -56,6 +55,7 @@ class AutoSpeed:
 
         self.MAX_MISSED_THRESHOLD = 3.0
         self.MIN_SHORT_MOVE_DISTANCE = 5.0
+        self.MINIMUM_CRUISE_DISTANCE = 20.0
 
         results_default = os.path.expanduser('~')
         for path in (os.path.dirname(self.printer.start_args['log_file']), os.path.expanduser('~/printer_data/config')):
@@ -120,11 +120,11 @@ class AutoSpeed:
         self.gcode.respond_info("="*40 + "\n")
 
         aw_velo = AttemptWrapper()
-        aw_velo.type, aw_velo.accuracy, aw_velo.max_missed = "velocity", self.veloc_accu, self.max_missed_original
+        aw_velo.type, aw_velo.accuracy, aw_velo.max_missed = "velocity", self.veloc_accu, self.MAX_MISSED_THRESHOLD
         aw_velo.margin, aw_velo.min, aw_velo.max, aw_velo.scv = self.margin, self.veloc_min, veloc_max, self.scv
         aw_velo.accel = rec_accel
         self.init_axis(aw_velo, axes[0])
-        max_velo = self.binary_search(aw_velo)
+        max_velo = self.velo_binary_search(aw_velo, samples)
         rec_velo = max_velo * derate
         self.gcode.respond_info(f"\nResult of Stage 2: Max Velo = {max_velo:.0f}, Recommended Safe Velo = {rec_velo:.0f}")
 
@@ -137,18 +137,17 @@ class AutoSpeed:
         self.gcode.respond_info("\n" + "="*40)
         self.gcode.respond_info(f"STAGE 4: Performing final 'Chaos Star' validation of recommended accel ({rec_accel:.0f}mm/s^2).")
         self.gcode.respond_info("="*40 + "\n")
-        self.run_safe_validation(rec_accel, validation_iters)
+        self.run_safe_validation(rec_accel, rec_velo, validation_iters)
 
         self.gcode.respond_info("\n" + "="*40)
         self.gcode.respond_info("AUTO_SPEED Routine Complete.")
         self.gcode.respond_info(f"Final Recommended Settings: Accel={rec_accel:.0f}, Velocity={rec_velo:.0f}")
         self.gcode.respond_info("="*40)
 
-    cmd_AUTO_SPEED_ACCEL_help = ("(Advanced) Finds max acceleration using the robust multi-test methodology.")
+    cmd_AUTO_SPEED_ACCEL_help = ("Finds max acceleration using the robust multi-test methodology.")
     def cmd_AUTO_SPEED_ACCEL(self, gcmd):
         if not len(self.steppers.keys()) == 3: raise gcmd.error(f"Printer must be homed first!")
         axes = self._parse_axis(gcmd.get("AXIS", self.default_axes))
-        margin = gcmd.get_float("MARGIN", self.margin, above=0.0)
         derate = gcmd.get_float('DERATE', self.derate, above=0.0, below=1.0)
         accel_min = gcmd.get_float('ACCEL_MIN', self.accel_min, above=1.0)
         accel_max = gcmd.get_float('ACCEL_MAX', self.accel_max, above=accel_min)
@@ -158,14 +157,12 @@ class AutoSpeed:
         validation_iters = gcmd.get_int('VALIDATION_ITERATIONS', self.final_validation_iterations, minval=1)
 
         self.gcode.respond_info(f"Starting robust acceleration search on axes: {axes}")
-        self.gcode.respond_info(f"Using robust failure threshold: max_missed = {self.MAX_MISSED_THRESHOLD}")
-
         rw = ResultsWrapper()
         start = perf_counter()
         for axis in axes:
             aw = AttemptWrapper()
             aw.type, aw.accuracy, aw.max_missed = "accel", accel_accu, self.MAX_MISSED_THRESHOLD
-            aw.margin, aw.min, aw.max, aw.scv = margin, accel_min, accel_max, scv
+            aw.margin, aw.min, aw.max, aw.scv = self.margin, accel_min, accel_max, scv
             self.init_axis(aw, axis)
             rw.vals[aw.axis] = self.accel_binary_search(aw, samples)
         
@@ -187,7 +184,46 @@ class AutoSpeed:
         respond += f"Recommended safe acceleration: {rw.vals['rec']:.0f}\n"
         self.gcode.respond_info(respond)
         
-        self.run_safe_validation(rw.vals['rec'], validation_iters)
+        self.run_safe_validation(rw.vals['rec'], self.default_velocity, validation_iters)
+        return rw
+
+    cmd_AUTO_SPEED_VELOCITY_help = ("Finds max velocity using the robust multi-test methodology.")
+    def cmd_AUTO_SPEED_VELOCITY(self, gcmd):
+        if not len(self.steppers.keys()) == 3: raise gcmd.error(f"Printer must be homed first!")
+        axes = self._parse_axis(gcmd.get("AXIS", self.default_axes))
+        derate = gcmd.get_float('DERATE', self.derate, above=0.0, below=1.0)
+        veloc_min = gcmd.get_float('VELOCITY_MIN', self.veloc_min, above=1.0)
+        veloc_max = gcmd.get_float('VELOCITY_MAX', self.veloc_max, above=veloc_min)
+        veloc_accu = gcmd.get_float('VELOCITY_ACCU', self.veloc_accu, above=0.0, below=1.0)
+        accel = gcmd.get_float('ACCEL', self.default_accel, above=1.0)
+        scv = gcmd.get_float('SCV', self.scv, above=1.0)
+        samples = gcmd.get_int('SAMPLES', self.samples_per_test_type, minval=1)
+
+        self.gcode.respond_info(f"Starting robust velocity search on axes: {axes}")
+        rw = ResultsWrapper()
+        start = perf_counter()
+        for axis in axes:
+            aw = AttemptWrapper()
+            aw.type, aw.accuracy, aw.max_missed = "velocity", veloc_accu, self.MAX_MISSED_THRESHOLD
+            aw.margin, aw.min, aw.max, aw.accel, aw.scv = self.margin, veloc_min, veloc_max, accel, scv
+            self.init_axis(aw, axis)
+            rw.vals[aw.axis] = self.velo_binary_search(aw, samples)
+
+        rw.duration = perf_counter() - start
+        rw.name = "velocity"
+        respond = f"AUTO SPEED search found maximum velocity after {rw.duration:.2f}s\n"
+        for axis in self.valid_axes:
+            if rw.vals.get(axis): respond += f"| {axis.replace('_', ' ').upper()} max: {rw.vals[axis]:.0f}\n"
+        self.gcode.respond_info(respond)
+        
+        original_vals = dict(rw.vals)
+        rw.derate(derate)
+        respond = f"Recommended values (derated by {derate*100}%):\n"
+        for axis, max_val in original_vals.items():
+            if rw.vals.get(axis):
+                respond += f"| {axis.replace('_', ' ').upper()} max: {rw.vals[axis]:.0f} (from {max_val:.0f})\n"
+        respond += f"Recommended safe velocity: {rw.vals['rec']:.0f}\n"
+        self.gcode.respond_info(respond)
         return rw
 
     def accel_binary_search(self, aw: AttemptWrapper, samples_per_type: int) -> float:
@@ -209,6 +245,25 @@ class AutoSpeed:
         self.gcode.respond_info(f"Highest passing acceleration: {m_min:.0f}")
         return m_min
 
+    def velo_binary_search(self, aw: AttemptWrapper, samples_per_type: int) -> float:
+        aw.time_start = perf_counter()
+        m_min, m_max = aw.min, aw.max
+        while (m_max - m_min) > (m_min * aw.accuracy):
+            test_velocity = (m_min + m_max) / 2.0
+            if test_velocity <= m_min or test_velocity >= m_max: break
+            self.gcode.respond_info(f"\n--- Testing velocity value: {test_velocity:.0f} ---")
+            passed = self._run_gauntlet_for_velo(test_velocity, aw, samples_per_type)
+            if passed:
+                self.gcode.respond_info(f"VALUE {test_velocity:.0f} PASSED all tests.")
+                m_min = test_velocity
+            else:
+                self.gcode.respond_info(f"VALUE {test_velocity:.0f} FAILED. This is the new ceiling.")
+                m_max = test_velocity
+        aw.time_total = perf_counter() - aw.time_start
+        self.gcode.respond_info(f"\nBinary search for axis {aw.axis} complete in {aw.time_total:.2f}s.")
+        self.gcode.respond_info(f"Highest passing velocity: {m_min:.0f}")
+        return m_min
+
     def _run_gauntlet_for_accel(self, test_accel: float, aw: AttemptWrapper, samples_per_type: int) -> bool:
         last_known_steps, _ = self._prehome(aw.move.home)
         
@@ -217,16 +272,15 @@ class AutoSpeed:
         dist_a = max(dist_a_theoretical, self.MIN_SHORT_MOVE_DISTANCE)
         aw.move.Calc(self.axis_limits, dist_a)
         for i in range(samples_per_type):
-            # --- MODIFIED: Added detailed reporting ---
             self.gcode.respond_info(f"Sample {i*2+1}/{samples_per_type*2} (Forward)... "
                                     f"Dist: {aw.move.dist:.2f}mm, Vel: {self.accel_test_velocity:.0f}mm/s, Accel: {test_accel:.0f}mm/s^2")
-            valid, current_steps = self._run_single_test_cycle(last_known_steps, aw, test_accel, forward=True)
+            valid, current_steps = self._run_single_test_cycle(last_known_steps, aw, test_accel, self.accel_test_velocity, forward=True)
             if not valid: return False
             last_known_steps = current_steps
             
             self.gcode.respond_info(f"Sample {i*2+2}/{samples_per_type*2} (Reverse)... "
                                     f"Dist: {aw.move.dist:.2f}mm, Vel: {self.accel_test_velocity:.0f}mm/s, Accel: {test_accel:.0f}mm/s^2")
-            valid, current_steps = self._run_single_test_cycle(last_known_steps, aw, test_accel, forward=False)
+            valid, current_steps = self._run_single_test_cycle(last_known_steps, aw, test_accel, self.accel_test_velocity, forward=False)
             if not valid: return False
             last_known_steps = current_steps
 
@@ -234,39 +288,58 @@ class AutoSpeed:
         dist_b = aw.move.max_safe_dist
         aw.move.Calc(self.axis_limits, dist_b)
         for i in range(samples_per_type):
-            # --- MODIFIED: Added detailed reporting ---
             self.gcode.respond_info(f"Sample {i*2+1}/{samples_per_type*2} (Forward)... "
                                     f"Dist: {aw.move.dist:.2f}mm, Vel: {self.accel_test_velocity:.0f}mm/s, Accel: {test_accel:.0f}mm/s^2")
-            valid, current_steps = self._run_single_test_cycle(last_known_steps, aw, test_accel, forward=True)
+            valid, current_steps = self._run_single_test_cycle(last_known_steps, aw, test_accel, self.accel_test_velocity, forward=True)
             if not valid: return False
             last_known_steps = current_steps
             
             self.gcode.respond_info(f"Sample {i*2+2}/{samples_per_type*2} (Reverse)... "
                                     f"Dist: {aw.move.dist:.2f}mm, Vel: {self.accel_test_velocity:.0f}mm/s, Accel: {test_accel:.0f}mm/s^2")
-            valid, current_steps = self._run_single_test_cycle(last_known_steps, aw, test_accel, forward=False)
+            valid, current_steps = self._run_single_test_cycle(last_known_steps, aw, test_accel, self.accel_test_velocity, forward=False)
             if not valid: return False
             last_known_steps = current_steps
             
         return True
 
-    def _run_single_test_cycle(self, start_steps, aw: AttemptWrapper, current_accel: float, forward: bool = True):
+    def _run_gauntlet_for_velo(self, test_velocity: float, aw: AttemptWrapper, samples_per_type: int) -> bool:
+        last_known_steps, _ = self._prehome(aw.move.home)
+        
+        self.gcode.respond_info(f"--- Running {samples_per_type}x2 Sustained Velocity Tests ---")
+        dist_required = (test_velocity**2 / aw.accel) + self.MINIMUM_CRUISE_DISTANCE
+        aw.move.Calc(self.axis_limits, dist_required)
+        for i in range(samples_per_type):
+            self.gcode.respond_info(f"Sample {i*2+1}/{samples_per_type*2} (Forward)... "
+                                    f"Dist: {aw.move.dist:.2f}mm, Vel: {test_velocity:.0f}mm/s, Accel: {aw.accel:.0f}mm/s^2")
+            valid, current_steps = self._run_single_test_cycle(last_known_steps, aw, aw.accel, test_velocity, forward=True)
+            if not valid: return False
+            last_known_steps = current_steps
+            
+            self.gcode.respond_info(f"Sample {i*2+2}/{samples_per_type*2} (Reverse)... "
+                                    f"Dist: {aw.move.dist:.2f}mm, Vel: {test_velocity:.0f}mm/s, Accel: {aw.accel:.0f}mm/s^2")
+            valid, current_steps = self._run_single_test_cycle(last_known_steps, aw, aw.accel, test_velocity, forward=False)
+            if not valid: return False
+            last_known_steps = current_steps
+        return True
+
+    def _run_single_test_cycle(self, start_steps, aw: AttemptWrapper, current_accel: float, current_velocity: float, forward: bool = True):
         self._set_velocity(self.default_velocity, self.default_accel, self.default_scv, self.default_accel_control_val)
         self._move(aw.move.center, self.default_velocity)
         self.toolhead.wait_moves()
         
-        self._set_velocity(self.accel_test_velocity, current_accel, aw.scv, 0.0)
+        self._set_velocity(current_velocity, current_accel, aw.scv, 0.0)
         if forward:
-            self._move(aw.move.corner_a, self.accel_test_velocity)
-            self._move(aw.move.corner_b, self.accel_test_velocity)
+            self._move(aw.move.corner_a, current_velocity)
+            self._move(aw.move.corner_b, current_velocity)
         else:
-            self._move(aw.move.corner_b, self.accel_test_velocity)
-            self._move(aw.move.corner_a, self.accel_test_velocity)
+            self._move(aw.move.corner_b, current_velocity)
+            self._move(aw.move.corner_a, current_velocity)
         self.toolhead.wait_moves()
         
         valid, current_steps, _, _ = self._posttest(start_steps, aw.max_missed, aw.move.home)
         return valid, current_steps
 
-    def run_safe_validation(self, recommended_accel: float, iterations: int):
+    def run_safe_validation(self, recommended_accel: float, recommended_velocity: float, iterations: int):
         passes, failures = 0, 0
         aw = AttemptWrapper()
         aw.max_missed = self.MAX_MISSED_THRESHOLD
@@ -308,12 +381,12 @@ class AutoSpeed:
             self._move(ctr, self.default_velocity)
             self.toolhead.wait_moves()
             
-            self._set_velocity(self.accel_test_velocity, recommended_accel, aw.scv, 0.0)
+            self._set_velocity(recommended_velocity, recommended_accel, aw.scv, 0.0)
             
-            self._move(c1, self.accel_test_velocity); self._move(c2, self.accel_test_velocity); self._move(c3, self.accel_test_velocity); self._move(c4, self.accel_test_velocity); self._move(c1, self.accel_test_velocity)
-            self._move(c3, self.accel_test_velocity); self._move(c1, self.accel_test_velocity); self._move(c2, self.accel_test_velocity); self._move(c4, self.accel_test_velocity); self._move(c3, self.accel_test_velocity)
-            self._move(m1, self.accel_test_velocity); self._move(m3, self.accel_test_velocity); self._move(m2, self.accel_test_velocity); self._move(m4, self.accel_test_velocity); self._move(m1, self.accel_test_velocity)
-            self._move(c2, self.accel_test_velocity)
+            self._move(c1, recommended_velocity); self._move(c2, recommended_velocity); self._move(c3, recommended_velocity); self._move(c4, recommended_velocity); self._move(c1, recommended_velocity)
+            self._move(c3, recommended_velocity); self._move(c1, recommended_velocity); self._move(c2, recommended_velocity); self._move(c4, recommended_velocity); self._move(c3, recommended_velocity)
+            self._move(m1, recommended_velocity); self._move(m3, recommended_velocity); self._move(m2, recommended_velocity); self._move(m4, recommended_velocity); self._move(m1, recommended_velocity)
+            self._move(c2, recommended_velocity)
             self.toolhead.wait_moves()
 
             valid, _, _, _ = self._posttest(start_steps, aw.max_missed, aw.home)
@@ -323,8 +396,8 @@ class AutoSpeed:
         self.gcode.respond_info("\n" + "="*40)
         self.gcode.respond_info("--- Automated Validation Complete ---")
         self.gcode.respond_info(f"Result: {passes} passes, {failures} failures out of {iterations} runs.")
-        if failures == 0: self.gcode.respond_info("CONFIRMATION PASSED: Recommended acceleration is highly reliable.")
-        else: self.gcode.respond_info("CONFIRMATION WARNING: Failures detected. Consider a lower value or increasing 'derate'.")
+        if failures == 0: self.gcode.respond_info("CONFIRMATION PASSED: Recommended settings are highly reliable.")
+        else: self.gcode.respond_info("CONFIRMATION WARNING: Failures detected. Consider lower values or increasing 'derate'.")
         self.gcode.respond_info("="*40)
 
     def handle_connect(self):
@@ -363,41 +436,6 @@ class AutoSpeed:
             if self.steppers.get("y"): self.axis_limits["y"] = {"min": self.steppers["y"][0], "max": self.steppers["y"][1], "center": (self.steppers["y"][0] + self.steppers["y"][1]) / 2, "dist": self.steppers["y"][1] - self.steppers["y"][0], "home": self.gcode_move.homing_position[1]}
             if self.steppers.get("z"): self.axis_limits["z"] = {"min": self.steppers["z"][0], "max": self.steppers["z"][1], "center": (self.steppers["z"][0] + self.steppers["z"][1]) / 2, "dist": self.steppers["z"][1] - self.steppers["z"][0], "home": self.gcode_move.homing_position[2]}
 
-    cmd_AUTO_SPEED_VELOCITY_help = ("(Legacy) Finds max velocity using the original method.")
-    def cmd_AUTO_SPEED_VELOCITY(self, gcmd):
-        if not len(self.steppers.keys()) == 3: raise gcmd.error(f"Printer must be homed first!")
-        axes = self._parse_axis(gcmd.get("AXIS", self._axis_to_str(self.axes)))
-        margin = gcmd.get_float("MARGIN", self.margin, above=0.0)
-        derate = gcmd.get_float('DERATE', self.derate, above=0.0, below=1.0)
-        max_missed = gcmd.get_float('MAX_MISSED', self.max_missed_original, above=0.0)
-        veloc_min = gcmd.get_float('VELOCITY_MIN', self.veloc_min, above=1.0)
-        veloc_max = gcmd.get_float('VELOCITY_MAX', self.veloc_max, above=veloc_min)
-        veloc_accu = gcmd.get_float('VELOCITY_ACCU', self.veloc_accu, above=0.0, below=1.0)
-        accel = gcmd.get_float('ACCEL', 1.0, above=1.0)
-        scv = gcmd.get_float('SCV', self.scv, above=1.0)
-        self.gcode.respond_info(f"AUTO SPEED finding maximum velocity on {axes}")
-        rw = ResultsWrapper()
-        start = perf_counter()
-        for axis in axes:
-            aw = AttemptWrapper()
-            aw.type, aw.accuracy, aw.max_missed = "velocity", veloc_accu, max_missed
-            aw.margin, aw.min, aw.max, aw.accel, aw.scv = margin, veloc_min, veloc_max, accel, scv
-            self.init_axis(aw, axis)
-            rw.vals[aw.axis] = self.binary_search(aw)
-        rw.duration = perf_counter() - start
-        rw.name = "velocity"
-        respond = f"AUTO SPEED found maximum velocity after {rw.duration:.2f}s\n"
-        for axis in self.valid_axes:
-            if rw.vals.get(axis): respond += f"| {axis.replace('_', ' ').upper()} max: {rw.vals[axis]:.0f}\n"
-        respond += "\n"
-        rw.derate(derate)
-        respond += f"Recommended values\n"
-        for axis in self.valid_axes:
-            if rw.vals.get('max_' + axis): respond += f"| {axis.replace('_', ' ').upper()} max: {rw.vals[axis]:.0f}\n"
-        respond += f"Recommended velocity: {rw.vals['rec']:.0f}\n"
-        self.gcode.respond_info(respond)
-        return rw
-
     cmd_AUTO_SPEED_VALIDATE_help = ("(Legacy) Validates settings using the original unsafe pattern.")
     def cmd_AUTO_SPEED_VALIDATE(self, gcmd):
         if not len(self.steppers.keys()) == 3: raise gcmd.error(f"Printer must be homed first!")
@@ -421,14 +459,12 @@ class AutoSpeed:
         self.gcode.respond_info(respond)
         return valid
 
-    cmd_AUTO_SPEED_GRAPH_help = ("(Legacy) Graphs accel vs. velocity using the original method.")
+    cmd_AUTO_SPEED_GRAPH_help = ("Graphs accel vs. velocity using a robust search.")
     def cmd_AUTO_SPEED_GRAPH(self, gcmd):
         import matplotlib.pyplot as plt
         if not len(self.steppers.keys()) == 3: raise gcmd.error(f"Printer must be homed first!")
         axes = self._parse_axis(gcmd.get("AXIS", self._axis_to_str(self.axes)))
-        margin = gcmd.get_float("MARGIN", self.margin, above=0.0)
         derate = gcmd.get_float('DERATE', self.derate, above=0.0, below=1.0)
-        max_missed = gcmd.get_float('MAX_MISSED', self.max_missed_original, above=0.0)
         scv = gcmd.get_float('SCV', default=self.toolhead.square_corner_velocity, above=1.0)
         veloc_min = gcmd.get_float('VELOCITY_MIN', 200.0, above=0.0)
         veloc_max = gcmd.get_float('VELOCITY_MAX', 700.0, above=veloc_min)
@@ -442,23 +478,20 @@ class AutoSpeed:
         respond += f"V_MIN: {veloc_min}, V_MAX: {veloc_max}, V_STEP: {veloc_step}\n"
         self.gcode.respond_info(respond)
         aw = AttemptWrapper()
-        aw.type, aw.accuracy, aw.max_missed, aw.margin, aw.scv = "graph", accel_accu, max_missed, margin, scv
+        aw.type, aw.accuracy, aw.max_missed, aw.scv = "graph", accel_accu, self.MAX_MISSED_THRESHOLD, scv
         for axis in axes:
             start = perf_counter()
             self.init_axis(aw, axis)
-            accels, accel_mins, accel_maxs = [], [], []
+            accels = []
             for veloc in velocs:
                 self.gcode.respond_info(f"AUTO SPEED graph {aw.axis} - v{veloc}")
-                aw.veloc = veloc
                 aw.min = round(calculate_graph(veloc, accel_min_slope))
                 aw.max = round(calculate_graph(veloc, accel_max_slope))
-                accel_mins.append(aw.min)
-                accel_maxs.append(aw.max)
-                accels.append(self.binary_search(aw))
+                aw.veloc = veloc # velocity is the constant here
+                # We are searching for accel, so we use the accel search
+                accels.append(self.accel_binary_search(aw, self.samples_per_test_type))
             plt.plot(velocs, accels, 'go-', label='measured')
             plt.plot(velocs, [a * derate for a in accels], 'g-', label='derated')
-            plt.plot(velocs, accel_mins, 'b--', label='min')
-            plt.plot(velocs, accel_maxs, 'r--', label='max')
             plt.legend(loc='upper right')
             plt.title(f"Max accel at velocity on {aw.axis} to {int(accel_accu*100)}% accuracy")
             plt.xlabel("Velocity")
@@ -527,73 +560,6 @@ class AutoSpeed:
         elif axis == "y": aw.move = MoveY()
         elif axis == "z": aw.move = MoveZ()
         aw.move.Init(self.axis_limits, aw.margin, self.isolate_xy)
-
-    def binary_search(self, aw: AttemptWrapper):
-        aw.time_start = perf_counter()
-        m_min, m_max = aw.min, aw.max
-        m_var = m_min + (m_max - m_min) // 3
-        if aw.veloc == 0.0: aw.veloc = 1.0
-        if aw.accel == 0.0: aw.accel = 1.0
-        from .funcs import calculate_accel, calculate_velocity
-        if aw.type in ("accel", "graph"):
-            m_stat, o_veloc = aw.veloc, aw.veloc
-            if o_veloc == 1.0: aw.accel = calculate_accel(aw.veloc, aw.move.max_dist)
-            aw.move.Calc(self.axis_limits, m_stat, m_var, aw.margin)
-        elif aw.type == "velocity":
-            m_stat, o_accel = aw.accel, aw.accel
-            if o_accel == 1.0: aw.veloc = calculate_velocity(aw.accel, aw.move.max_dist)
-            aw.move.Calc(self.axis_limits, m_var, m_stat, aw.margin)
-        
-        measured_val = None
-        aw.tries = 0
-        aw.home_steps, aw.move_time_prehome = self._prehome(aw.move.home)
-        while True:
-            aw.tries += 1
-            if aw.type in ("accel", "graph"):
-                if o_veloc == 1.0: m_stat = aw.veloc = calculate_velocity(m_var, aw.move.dist) / 2.5
-                aw.accel = m_var
-                aw.move.Calc(self.axis_limits, m_stat, m_var, aw.margin)
-            elif aw.type == "velocity":
-                if o_accel == 1.0: m_stat = aw.accel = calculate_accel(m_var, aw.move.dist) * 2.5
-                aw.veloc = m_var
-                aw.move.Calc(self.axis_limits, m_var, m_stat, aw.margin)
-            
-            valid = self._attempt(aw)
-            veloc = m_var if aw.type == "velocity" else m_stat
-            accel = m_var if aw.type in ("accel", "graph") else m_stat
-            
-            respond = f"AUTO SPEED {aw.type} on {aw.axis} try {aw.tries} ({aw.time_last:.2f}s)\n"
-            respond += f"Moved {aw.move_dist - aw.margin:.2f}mm at a{accel:.0f}/v{veloc:.0f} after {aw.move_time_prehome:.2f}/{aw.move_time:.2f}/{aw.move_time_posthome:.2f}s\n"
-            respond += f"Missed"
-            if aw.move.home[0]: respond += f" X {aw.missed['x']:.2f},"
-            if aw.move.home[1]: respond += f" Y {aw.missed['y']:.2f},"
-            if aw.move.home[2]: respond += f" Z {aw.missed['z']:.2f},"
-            self.gcode.respond_info(respond[:-1])
-            
-            if measured_val is not None:
-                if m_var * (1 + aw.accuracy) > m_max or m_var * (1 - aw.accuracy) < m_min:
-                    break
-            measured_val = m_var
-            if valid: m_min = m_var
-            else: m_max = m_var
-            m_var = (m_min + m_max) // 2
-        aw.time_total = perf_counter() - aw.time_start
-        return m_var
-
-    def _attempt(self, aw: AttemptWrapper):
-        timeAttempt = perf_counter()
-        self._set_velocity(self.default_velocity, self.default_accel, self.default_scv, self.default_accel_control_val)
-        self._move([aw.move.pos["x"][0], aw.move.pos["y"][0], aw.move.pos["z"][0]], self.default_velocity)
-        self.toolhead.wait_moves()
-        self._set_velocity(aw.veloc, aw.accel, aw.scv)
-        timeMove = perf_counter()
-        self._move([aw.move.pos["x"][1], aw.move.pos["y"][1], aw.move.pos["z"][1]], aw.veloc)
-        self.toolhead.wait_moves()
-        aw.move_time = perf_counter() - timeMove
-        aw.move_dist = aw.move.dist
-        valid, aw.home_steps, aw.missed, aw.move_time_posthome = self._posttest(aw.home_steps, aw.max_missed, aw.move.home)
-        aw.time_last = perf_counter() - timeAttempt
-        return valid
 
     def _validate(self, speed, iterations, margin, small_margin, max_missed):
         pos = {"x": {"min": self.axis_limits["x"]["min"] + margin, "max": self.axis_limits["x"]["max"] - margin, "center_min": self.axis_limits["x"]["center"] - (small_margin / 2), "center_max": self.axis_limits["x"]["center"] + (small_margin / 2)}, "y": {"min": self.axis_limits["y"]["min"] + margin, "max": self.axis_limits["y"]["max"] - margin, "center_min": self.axis_limits["y"]["center"] - (small_margin / 2), "center_max": self.axis_limits["y"]["center"] + (small_margin / 2)}}
