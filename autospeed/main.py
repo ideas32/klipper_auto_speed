@@ -35,6 +35,9 @@ class AutoSpeed:
 
         self.margin = config.getfloat('margin', default=20.0, above=0.0)
         self.settling_home = config.getboolean('settling_home', default=True)
+        # --- THIS IS THE FIX ---
+        # Initialize max_missed_original from the config for legacy functions
+        self.max_missed_original = config.getfloat('max_missed', default=1.0)
         self.endstop_samples = config.getint('endstop_samples', default=3, minval=2)
 
         self.accel_min = config.getfloat('accel_min', default=1000.0, above=1.0)
@@ -55,7 +58,6 @@ class AutoSpeed:
 
         self.MAX_MISSED_THRESHOLD = 3.0
         self.MIN_SHORT_MOVE_DISTANCE = 5.0
-        self.MINIMUM_CRUISE_DISTANCE = 20.0
 
         results_default = os.path.expanduser('~')
         for path in (os.path.dirname(self.printer.start_args['log_file']), os.path.expanduser('~/printer_data/config')):
@@ -487,8 +489,7 @@ class AutoSpeed:
                 self.gcode.respond_info(f"AUTO SPEED graph {aw.axis} - v{veloc}")
                 aw.min = round(calculate_graph(veloc, accel_min_slope))
                 aw.max = round(calculate_graph(veloc, accel_max_slope))
-                aw.veloc = veloc # velocity is the constant here
-                # We are searching for accel, so we use the accel search
+                aw.veloc = veloc
                 accels.append(self.accel_binary_search(aw, self.samples_per_test_type))
             plt.plot(velocs, accels, 'go-', label='measured')
             plt.plot(velocs, [a * derate for a in accels], 'g-', label='derated')
