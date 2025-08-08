@@ -421,6 +421,9 @@ class AutoSpeed:
         self._level(gcmd)
         self._set_velocity(self.default_velocity, self.default_accel, self.default_scv, self.default_accel_control_val)
         self._move([self.axis_limits["x"]["center"], self.axis_limits["y"]["center"], self.axis_limits["z"]["center"]], self.default_velocity)
+        # --- NEW: Dwell to allow vibrations to settle ---
+        self.gcode.run_script_from_command("M400")
+        self.gcode.respond_info("Toolhead centered and settled. Beginning tests.")
         self._variance(gcmd)
         return perf_counter() - start
 
