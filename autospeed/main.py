@@ -268,17 +268,18 @@ class AutoSpeed:
         aw.home = [True, True, False]
 
         min_travel = min(self.axis_limits["x"]["dist"], self.axis_limits["y"]["dist"])
-        max_safe_size = (min_travel / 3.0) - (10.0 / 1.5)
+        # Definitive safety formula based on rigorous vector sum analysis.
+        # Max displacement = 6*S. Formula: S < (travel/12) - (gap/6)
+        max_safe_size = (min_travel / 12.0) - (10.0 / 6.0)
 
-        if self.validation_pattern_size is None:
+        size = self.validation_pattern_size
+        if size is None:
             size = max_safe_size
             self.gcode.respond_info(f"AUTO_SPEED: No validation pattern size configured. Automatically using max safe size: {size:.2f}mm")
-        else:
-            size = self.validation_pattern_size
-            if size > max_safe_size:
-                self.gcode.respond_info(f"ERROR: Configured validation_pattern_size ({size}mm) is unsafe for this printer.")
-                self.gcode.respond_info(f"The maximum safe size is {max_safe_size:.2f}mm. Skipping validation.")
-                return
+        elif size > max_safe_size:
+            self.gcode.respond_info(f"ERROR: Configured validation_pattern_size ({size}mm) is unsafe for this printer.")
+            self.gcode.respond_info(f"The maximum safe size is {max_safe_size:.2f}mm. Skipping validation.")
+            return
 
         self.gcode.respond_info(f"--- Automated 'Chaos Star' Validation ({size:.1f}mm pattern) ---")
         self.gcode.respond_info(f"Performing {iterations} full iterations of the chaotic pattern.")
