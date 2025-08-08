@@ -209,7 +209,6 @@ class AutoSpeed:
         return m_min
 
     def _run_gauntlet_for_accel(self, test_accel: float, aw: AttemptWrapper, samples_per_type: int) -> bool:
-        self.gcode.respond_info("Initializing gauntlet with a starting home...")
         last_known_steps, _ = self._prehome(aw.move.home)
         
         self.gcode.respond_info(f"--- Running {samples_per_type} Accel-Focused Tests (Short & Sharp) ---")
@@ -218,8 +217,7 @@ class AutoSpeed:
         aw.move.Calc(self.axis_limits, dist_a)
         for i in range(samples_per_type):
             self.gcode.respond_info(f"Sample {i+1}/{samples_per_type}...")
-            self._perform_reversing_move(aw, test_accel)
-            valid, current_steps, _, _ = self._posttest(last_known_steps, aw.max_missed, aw.move.home)
+            valid, current_steps = self._run_single_test_cycle(last_known_steps, aw, test_accel)
             if not valid: return False
             last_known_steps = current_steps
 
@@ -228,19 +226,26 @@ class AutoSpeed:
         aw.move.Calc(self.axis_limits, dist_b)
         for i in range(samples_per_type):
             self.gcode.respond_info(f"Sample {i+1}/{samples_per_type}...")
-            self._perform_reversing_move(aw, test_accel)
-            valid, current_steps, _, _ = self._posttest(last_known_steps, aw.max_missed, aw.move.home)
+            valid, current_steps = self._run_single_test_cycle(last_known_steps, aw, test_accel)
             if not valid: return False
             last_known_steps = current_steps
             
         return True
 
-    def _perform_reversing_move(self, aw: AttemptWrapper, current_accel: float):
+    def _run_single_test_cycle(self, start_steps, aw: AttemptWrapper, current_accel: float):
+        # This is the core safe test sequence
+        self._set_velocity(self.default_velocity, self.default_accel, self.default_scv, self.default_accel_control_val)
+        self._move(aw.move.center, self.default_velocity)
+        self.toolhead.wait_moves() # Dwell to settle
+        
         self._set_velocity(self.accel_test_velocity, current_accel, aw.scv, 0.0)
         self._move(aw.move.corner_a, self.accel_test_velocity)
         self._move(aw.move.corner_b, self.accel_test_velocity)
         self._move(aw.move.center, self.accel_test_velocity)
         self.toolhead.wait_moves()
+        
+        valid, current_steps, _, _ = self._posttest(start_steps, aw.max_missed, aw.move.home)
+        return valid, current_steps
 
     def run_safe_validation(self, recommended_accel: float, axis: str, iterations: int):
         passes, failures = 0, 0
@@ -255,12 +260,7 @@ class AutoSpeed:
         for i in range(iterations):
             self.gcode.respond_info(f"Validation run {i+1}/{iterations}...")
             start_steps, _ = self._prehome(aw.move.home)
-            self._set_velocity(self.accel_test_velocity, recommended_accel, aw.scv, 0.0)
-            self._move(aw.move.corner_a, self.accel_test_velocity)
-            self._move(aw.move.corner_b, self.accel_test_velocity)
-            self._move(aw.move.center, self.accel_test_velocity)
-            self.toolhead.wait_moves()
-            valid, _, _, _ = self._posttest(start_steps, aw.max_missed, aw.move.home)
+            valid, _ = self._run_single_test_cycle(start_steps, aw, recommended_accel)
             if valid: passes += 1
             else: failures += 1
         
@@ -421,7 +421,6 @@ class AutoSpeed:
         self._level(gcmd)
         self._set_velocity(self.default_velocity, self.default_accel, self.default_scv, self.default_accel_control_val)
         self._move([self.axis_limits["x"]["center"], self.axis_limits["y"]["center"], self.axis_limits["z"]["center"]], self.default_velocity)
-        # --- NEW: Dwell to allow vibrations to settle ---
         self.gcode.run_script_from_command("M400")
         self.gcode.respond_info("Toolhead centered and settled. Beginning tests.")
         self._variance(gcmd)
@@ -593,11 +592,8 @@ class AutoSpeed:
         self.toolhead.manual_move(coord, speed)
 
     def _home(self, x=True, y=True, z=True):
-        if self.use_cruise_ratio:
-            prev_accel, prev_veloc, prev_scv, prev_accel_control = self.toolhead.max_accel, self.toolhead.max_velocity, self.toolhead.square_corner_velocity, self.toolhead.min_cruise_ratio
-        else:
-            prev_accel, prev_veloc, prev_scv, prev_accel_control = self.toolhead.max_accel, self.toolhead.max_velocity, self.toolhead.square_corner_velocity, self.toolhead.max_accel_to_decel
-
+        # This function now exclusively uses the stored safe defaults for the homing move.
+        # It no longer saves/restores state, making it safer and more predictable.
         self._set_velocity(self.default_velocity, self.default_accel, self.default_scv, self.default_accel_control_val)
         command = ["G28"]
         if x: command[-1] += " X0"
@@ -605,7 +601,6 @@ class AutoSpeed:
         if z: command[-1] += " Z0"
         self.gcode._process_commands(command, False)
         self.toolhead.wait_moves()
-        self._set_velocity(prev_veloc, prev_accel, prev_scv, prev_accel_control)
 
     def _get_steps(self):
         steppers = self.toolhead.get_kinematics().get_steppers()
@@ -615,7 +610,6 @@ class AutoSpeed:
         self.toolhead.wait_moves()
         dur = perf_counter()
         self._home(home[0], home[1], home[2])
-        self.toolhead.wait_moves()
         dur = perf_counter() - dur
         return self._get_steps(), dur
 
@@ -623,7 +617,6 @@ class AutoSpeed:
         self.toolhead.wait_moves()
         dur = perf_counter()
         self._home(home[0], home[1], home[2])
-        self.toolhead.wait_moves()
         dur = perf_counter() - dur
         valid = True
         stop_steps = self._get_steps()
