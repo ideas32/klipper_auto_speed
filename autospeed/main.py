@@ -58,7 +58,8 @@ class AutoSpeed:
 
         self.MAX_MISSED_THRESHOLD = 3.0
         self.MIN_SHORT_MOVE_DISTANCE = 5.0
-
+        self.MINIMUM_CRUISE_DISTANCE = 20.0
+        
         results_default = os.path.expanduser('~')
         for path in (os.path.dirname(self.printer.start_args['log_file']), os.path.expanduser('~/printer_data/config')):
             if os.path.exists(path):
