@@ -217,12 +217,15 @@ class AutoSpeed:
         dist_a = max(dist_a_theoretical, self.MIN_SHORT_MOVE_DISTANCE)
         aw.move.Calc(self.axis_limits, dist_a)
         for i in range(samples_per_type):
-            self.gcode.respond_info(f"Sample {i*2+1}/{samples_per_type*2} (Forward)...")
+            # --- MODIFIED: Added detailed reporting ---
+            self.gcode.respond_info(f"Sample {i*2+1}/{samples_per_type*2} (Forward)... "
+                                    f"Dist: {aw.move.dist:.2f}mm, Vel: {self.accel_test_velocity:.0f}mm/s, Accel: {test_accel:.0f}mm/s^2")
             valid, current_steps = self._run_single_test_cycle(last_known_steps, aw, test_accel, forward=True)
             if not valid: return False
             last_known_steps = current_steps
             
-            self.gcode.respond_info(f"Sample {i*2+2}/{samples_per_type*2} (Reverse)...")
+            self.gcode.respond_info(f"Sample {i*2+2}/{samples_per_type*2} (Reverse)... "
+                                    f"Dist: {aw.move.dist:.2f}mm, Vel: {self.accel_test_velocity:.0f}mm/s, Accel: {test_accel:.0f}mm/s^2")
             valid, current_steps = self._run_single_test_cycle(last_known_steps, aw, test_accel, forward=False)
             if not valid: return False
             last_known_steps = current_steps
@@ -231,12 +234,15 @@ class AutoSpeed:
         dist_b = aw.move.max_safe_dist
         aw.move.Calc(self.axis_limits, dist_b)
         for i in range(samples_per_type):
-            self.gcode.respond_info(f"Sample {i*2+1}/{samples_per_type*2} (Forward)...")
+            # --- MODIFIED: Added detailed reporting ---
+            self.gcode.respond_info(f"Sample {i*2+1}/{samples_per_type*2} (Forward)... "
+                                    f"Dist: {aw.move.dist:.2f}mm, Vel: {self.accel_test_velocity:.0f}mm/s, Accel: {test_accel:.0f}mm/s^2")
             valid, current_steps = self._run_single_test_cycle(last_known_steps, aw, test_accel, forward=True)
             if not valid: return False
             last_known_steps = current_steps
             
-            self.gcode.respond_info(f"Sample {i*2+2}/{samples_per_type*2} (Reverse)...")
+            self.gcode.respond_info(f"Sample {i*2+2}/{samples_per_type*2} (Reverse)... "
+                                    f"Dist: {aw.move.dist:.2f}mm, Vel: {self.accel_test_velocity:.0f}mm/s, Accel: {test_accel:.0f}mm/s^2")
             valid, current_steps = self._run_single_test_cycle(last_known_steps, aw, test_accel, forward=False)
             if not valid: return False
             last_known_steps = current_steps
@@ -268,8 +274,6 @@ class AutoSpeed:
         aw.home = [True, True, False]
 
         min_travel = min(self.axis_limits["x"]["dist"], self.axis_limits["y"]["dist"])
-        # Definitive safety formula based on rigorous vector sum analysis.
-        # Max displacement = 6*S. Formula: S < (travel/12) - (gap/6)
         max_safe_size = (min_travel / 12.0) - (10.0 / 6.0)
 
         size = self.validation_pattern_size
