@@ -52,8 +52,9 @@ class AutoSpeed:
         self.samples_per_test_type = config.getint('samples_per_test_type', 3, minval=1)
         self.final_validation_iterations = config.getint('final_validation_iterations', 30, minval=1)
 
-        self.CONSTANT_VELOCITY_DISTANCE = 20.0
+        # --- CONSTANTS FOR THE NEW METHODOLOGY ---
         self.MAX_MISSED_THRESHOLD = 3.0
+        self.MIN_SHORT_MOVE_DISTANCE = 5.0
 
         results_default = os.path.expanduser('~')
         for path in (os.path.dirname(self.printer.start_args['log_file']), os.path.expanduser('~/printer_data/config')):
@@ -207,7 +208,8 @@ class AutoSpeed:
         last_known_steps, _ = self._prehome(aw.move.home)
         
         self.gcode.respond_info(f"--- Running {samples_per_type} Accel-Focused Tests (Short & Sharp) ---")
-        dist_a = calculate_accel_focused_dist(self.accel_test_velocity, test_accel)
+        dist_a_theoretical = calculate_accel_focused_dist(self.accel_test_velocity, test_accel)
+        dist_a = max(dist_a_theoretical, self.MIN_SHORT_MOVE_DISTANCE)
         aw.move.Calc(self.axis_limits, dist_a)
         for i in range(samples_per_type):
             self.gcode.respond_info(f"Sample {i+1}/{samples_per_type}...")
@@ -216,8 +218,11 @@ class AutoSpeed:
             if not valid: return False
             last_known_steps = current_steps
 
-        self.gcode.respond_info(f"--- Running {samples_per_type} Velo-Plateau Tests (Long & Smooth) ---")
-        dist_b = calculate_velo_plateau_dist(self.accel_test_velocity, test_accel, self.CONSTANT_VELOCITY_DISTANCE)
+        self.gcode.respond_info(f"--- Running {samples_per_type} Velo-Plateau Tests (Long & Sustained) ---")
+        # --- THIS IS THE KEY CHANGE FOR THE LONG MOVE ---
+        # Instead of a calculated plateau, we now use the maximum safe distance
+        # available for this axis, making it a true "long move" test.
+        dist_b = aw.move.max_safe_dist
         aw.move.Calc(self.axis_limits, dist_b)
         for i in range(samples_per_type):
             self.gcode.respond_info(f"Sample {i+1}/{samples_per_type}...")
@@ -242,7 +247,7 @@ class AutoSpeed:
         aw.max_missed = self.MAX_MISSED_THRESHOLD
         aw.home = aw.move.home
         aw.scv = self.scv
-        dist = calculate_velo_plateau_dist(self.accel_test_velocity, recommended_accel, self.CONSTANT_VELOCITY_DISTANCE)
+        dist = aw.move.max_safe_dist # Use the max safe distance for validation moves
         aw.move.Calc(self.axis_limits, dist)
 
         for i in range(iterations):
@@ -259,8 +264,6 @@ class AutoSpeed:
         if failures == 0: self.gcode.respond_info("CONFIRMATION PASSED: Recommended acceleration is highly reliable.")
         else: self.gcode.respond_info("CONFIRMATION WARNING: Failures detected. Consider a lower value or increasing 'derate'.")
         self.gcode.respond_info("="*40)
-
-    # --- ALL ORIGINAL AND HELPER METHODS BELOW THIS LINE ---
 
     def handle_connect(self):
         self.toolhead = self.printer.lookup_object('toolhead')
