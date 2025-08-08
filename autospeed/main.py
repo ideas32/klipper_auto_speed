@@ -52,7 +52,6 @@ class AutoSpeed:
         self.samples_per_test_type = config.getint('samples_per_test_type', 3, minval=1)
         self.final_validation_iterations = config.getint('final_validation_iterations', 30, minval=1)
 
-        # --- CONSTANTS FOR THE NEW METHODOLOGY ---
         self.MAX_MISSED_THRESHOLD = 3.0
         self.MIN_SHORT_MOVE_DISTANCE = 5.0
 
@@ -63,6 +62,11 @@ class AutoSpeed:
         self.results_dir = os.path.expanduser(config.get('results_dir', default=results_default))
 
         self.toolhead = None
+        self.default_velocity = None
+        self.default_accel = None
+        self.default_scv = None
+        self.default_minimum_cruise_ratio = None
+        
         self.printer.register_event_handler("klippy:connect", self.handle_connect)
         self.printer.register_event_handler("homing:home_rails_end", self.handle_home_rails_end)
 
@@ -93,7 +97,7 @@ class AutoSpeed:
 
         self._prepare(gcmd)
         move_z = gcmd.get_int('Z', None)
-        if move_z is not None: self._move([None, None, move_z], self.th_veloc)
+        if move_z is not None: self._move([None, None, move_z], self.default_velocity)
 
         self.gcode.respond_info("\n" + "="*40)
         self.gcode.respond_info(f"STAGE 1: Finding baseline max acceleration on '{axes[0]}' at {self.accel_test_velocity}mm/s.")
@@ -219,9 +223,6 @@ class AutoSpeed:
             last_known_steps = current_steps
 
         self.gcode.respond_info(f"--- Running {samples_per_type} Velo-Plateau Tests (Long & Sustained) ---")
-        # --- THIS IS THE KEY CHANGE FOR THE LONG MOVE ---
-        # Instead of a calculated plateau, we now use the maximum safe distance
-        # available for this axis, making it a true "long move" test.
         dist_b = aw.move.max_safe_dist
         aw.move.Calc(self.axis_limits, dist_b)
         for i in range(samples_per_type):
@@ -234,7 +235,8 @@ class AutoSpeed:
         return True
 
     def _perform_reversing_move(self, aw: AttemptWrapper, current_accel: float):
-        self._set_velocity(self.accel_test_velocity, current_accel, aw.scv)
+        # Set cruise ratio to 0.0 to allow for pure accel/decel moves.
+        self._set_velocity(self.accel_test_velocity, current_accel, aw.scv, 0.0)
         self._move(aw.move.corner_a, self.accel_test_velocity)
         self._move(aw.move.corner_b, self.accel_test_velocity)
         self._move(aw.move.center, self.accel_test_velocity)
@@ -247,13 +249,18 @@ class AutoSpeed:
         aw.max_missed = self.MAX_MISSED_THRESHOLD
         aw.home = aw.move.home
         aw.scv = self.scv
-        dist = aw.move.max_safe_dist # Use the max safe distance for validation moves
+        dist = aw.move.max_safe_dist
         aw.move.Calc(self.axis_limits, dist)
 
         for i in range(iterations):
             self.gcode.respond_info(f"Validation run {i+1}/{iterations}...")
             start_steps, _ = self._prehome(aw.move.home)
-            self._perform_reversing_move(aw, recommended_accel)
+            # Set cruise ratio to 0.0 for validation moves as well.
+            self._set_velocity(self.accel_test_velocity, recommended_accel, aw.scv, 0.0)
+            self._move(aw.move.corner_a, self.accel_test_velocity)
+            self._move(aw.move.corner_b, self.accel_test_velocity)
+            self._move(aw.move.center, self.accel_test_velocity)
+            self.toolhead.wait_moves()
             valid, _, _, _ = self._posttest(start_steps, aw.max_missed, aw.move.home)
             if valid: passes += 1
             else: failures += 1
@@ -267,9 +274,15 @@ class AutoSpeed:
 
     def handle_connect(self):
         self.toolhead = self.printer.lookup_object('toolhead')
-        self.th_accel = self.toolhead.max_accel / 2
-        self.th_veloc = self.toolhead.max_velocity / 2
-        self.th_scv = self.toolhead.square_corner_velocity
+        self.default_velocity = self.toolhead.max_velocity
+        self.default_accel = self.toolhead.max_accel
+        self.default_scv = self.toolhead.square_corner_velocity
+        self.default_minimum_cruise_ratio = self.config.getsection('printer').getfloat('minimum_cruise_ratio', 0.5)
+
+        self.gcode.respond_info(
+            f"AutoSpeed: Stored default limits: V={self.default_velocity}, A={self.default_accel}, "
+            f"SCV={self.default_scv}, MinCruiseRatio={self.default_minimum_cruise_ratio}")
+
         if self.printer.lookup_object("screw_tilt_adjust", None) is not None: self.level = "STA"
         elif self.printer.lookup_object("z_tilt", None) is not None: self.level = "ZT"
         elif self.printer.lookup_object("quad_gantry_level", None) is not None: self.level = "QGL"
@@ -403,7 +416,8 @@ class AutoSpeed:
         if not len(self.steppers.keys()) == 3: raise gcmd.error(f"Printer must be homed first!")
         start = perf_counter()
         self._level(gcmd)
-        self._move([self.axis_limits["x"]["center"], self.axis_limits["y"]["center"], self.axis_limits["z"]["center"]], self.th_veloc)
+        self._set_velocity(self.default_velocity, self.default_accel, self.default_scv, self.default_minimum_cruise_ratio)
+        self._move([self.axis_limits["x"]["center"], self.axis_limits["y"]["center"], self.axis_limits["z"]["center"]], self.default_velocity)
         self._variance(gcmd)
         return perf_counter() - start
 
@@ -507,8 +521,8 @@ class AutoSpeed:
 
     def _attempt(self, aw: AttemptWrapper):
         timeAttempt = perf_counter()
-        self._set_velocity(self.th_veloc, self.th_accel, self.th_scv)
-        self._move([aw.move.pos["x"][0], aw.move.pos["y"][0], aw.move.pos["z"][0]], self.th_veloc)
+        self._set_velocity(self.default_velocity, self.default_accel, self.default_scv, self.default_minimum_cruise_ratio)
+        self._move([aw.move.pos["x"][0], aw.move.pos["y"][0], aw.move.pos["z"][0]], self.default_velocity)
         self.toolhead.wait_moves()
         self._set_velocity(aw.veloc, aw.accel, aw.scv)
         timeMove = perf_counter()
@@ -573,15 +587,15 @@ class AutoSpeed:
         self.toolhead.manual_move(coord, speed)
 
     def _home(self, x=True, y=True, z=True):
-        prev_accel, prev_veloc, prev_scv = self.toolhead.max_accel, self.toolhead.max_velocity, self.toolhead.square_corner_velocity
-        self._set_velocity(self.th_veloc, self.th_accel, self.th_scv)
+        prev_accel, prev_veloc, prev_scv, prev_mcr = self.toolhead.max_accel, self.toolhead.max_velocity, self.toolhead.square_corner_velocity, self.toolhead.minimum_cruise_ratio
+        self._set_velocity(self.default_velocity, self.default_accel, self.default_scv, self.default_minimum_cruise_ratio)
         command = ["G28"]
         if x: command[-1] += " X0"
         if y: command[-1] += " Y0"
         if z: command[-1] += " Z0"
         self.gcode._process_commands(command, False)
         self.toolhead.wait_moves()
-        self._set_velocity(prev_veloc, prev_accel, prev_scv)
+        self._set_velocity(prev_veloc, prev_accel, prev_scv, prev_mcr)
 
     def _get_steps(self):
         steppers = self.toolhead.get_kinematics().get_steppers()
@@ -615,11 +629,15 @@ class AutoSpeed:
             if missed["z"] > max_missed: valid = False
         return valid, stop_steps, missed, dur
 
-    def _set_velocity(self, velocity: float, accel: float, scv: float):
+    def _set_velocity(self, velocity: float, accel: float, scv: float, minimum_cruise_ratio: float = None):
         self.toolhead.max_velocity = velocity
         self.toolhead.max_accel = accel
-        self.toolhead.requested_accel_to_decel = accel / 2
+        self.toolhead.max_accel_to_decel = accel # For compatibility with older Klipper versions
         self.toolhead.square_corner_velocity = scv
+        if minimum_cruise_ratio is None:
+            self.toolhead.minimum_cruise_ratio = self.default_minimum_cruise_ratio
+        else:
+            self.toolhead.minimum_cruise_ratio = minimum_cruise_ratio
         self.toolhead._calc_junction_deviation()
 
     def cmd_X_ENDSTOP_ACCURACY(self, gcmd):
